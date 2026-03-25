@@ -1,4 +1,4 @@
-# kis_client.py — 한국 + 미국 주식 통합 클라이언트
+# kis_client.py — KR+US 통합 (디버그 모드)
 import os, requests, json
 import time as _time
 from dotenv import load_dotenv
@@ -11,15 +11,13 @@ ACCOUNT_NO = os.getenv("KIS_ACCOUNT_NO")
 PROD_CD    = os.getenv("KIS_ACCOUNT_PROD_CD", "01")
 IS_MOCK    = os.getenv("IS_MOCK", "true").lower() == "true"
 
-# 한국 / 미국 BASE URL
 KR_BASE = "https://openapivts.koreainvestment.com:29443" if IS_MOCK \
           else "https://openapi.koreainvestment.com:9443"
-US_BASE = "https://openapivts.koreainvestment.com:29443" if IS_MOCK \
-          else "https://openapi.koreainvestment.com:9443"
+US_BASE = KR_BASE
 
 TOKEN_FILE = ".token_cache.json"
 
-# ── 토큰 (파일 캐시) ──────────────────────────
+# ── 토큰 발급 ──────────────────────────────────
 def get_token() -> str:
     if os.path.exists(TOKEN_FILE):
         try:
@@ -45,6 +43,24 @@ def get_token() -> str:
     print("✅ 토큰 발급 완료")
     return cache["token"]
 
+# ── Hashkey ────────────────────────────────────
+def get_hashkey(data: dict) -> str:
+    try:
+        res = requests.post(
+            f"{KR_BASE}/uapi/hashkey",
+            headers={
+                "Content-Type": "application/json",
+                "appkey":       APP_KEY,
+                "appsecret":    APP_SECRET,
+            },
+            json=data
+        )
+        return res.json().get("HASH", "")
+    except Exception as e:
+        print(f"⚠ hashkey 발급 실패: {e}")
+        return ""
+
+# ── 헤더 ───────────────────────────────────────
 def get_headers(tr_id: str) -> dict:
     return {
         "Content-Type":  "application/json",
@@ -52,8 +68,13 @@ def get_headers(tr_id: str) -> dict:
         "appkey":        APP_KEY,
         "appsecret":     APP_SECRET,
         "tr_id":         tr_id,
-        "custtype":      "P"
+        "custtype":      "P",
     }
+
+def get_order_headers(tr_id: str, body: dict) -> dict:
+    headers = get_headers(tr_id)
+    headers["hashkey"] = get_hashkey(body)
+    return headers
 
 # ══════════════════════════════════════════════
 # 한국 주식
@@ -78,7 +99,6 @@ def get_price_kr(stock_code: str) -> dict:
         "currency":    "KRW"
     }
 
-# get_price 는 하위 호환용 alias
 def get_price(stock_code: str) -> dict:
     return get_price_kr(stock_code)
 
@@ -104,154 +124,160 @@ def get_balance() -> dict:
 def place_order_kr(stock_code: str, qty: int, price: int, side: str) -> dict:
     tr_id = ("VTTC0802U" if IS_MOCK else "TTTC0802U") if side == "BUY" \
             else ("VTTC0801U" if IS_MOCK else "TTTC0801U")
+
+    body = {
+        "CANO":         ACCOUNT_NO,
+        "ACNT_PRDT_CD": PROD_CD,
+        "PDNO":         stock_code,
+        "ORD_DVSN":     "00",
+        "ORD_QTY":      str(qty),
+        "ORD_UNPR":     str(price),
+    }
+
+    headers = get_order_headers(tr_id, body)
+
+    # ── 디버그: 요청 내용 출력 ──
+    print(f"\n[DEBUG] URL: {KR_BASE}/uapi/domestic-stock/v1/trading/order-cash")
+    print(f"[DEBUG] tr_id: {tr_id}")
+    print(f"[DEBUG] CANO: {ACCOUNT_NO} / PROD_CD: {PROD_CD}")
+    print(f"[DEBUG] body: {json.dumps(body, ensure_ascii=False)}")
+
     res = requests.post(
         f"{KR_BASE}/uapi/domestic-stock/v1/trading/order-cash",
-        headers=get_headers(tr_id),
-        json={
-            "CANO": ACCOUNT_NO, "ACNT_PRDT_CD": PROD_CD,
-            "PDNO": stock_code, "ORD_DVSN": "00",
-            "ORD_QTY": str(qty), "ORD_UNPR": str(price)
-        }
+        headers=headers,
+        json=body
     )
-    res.raise_for_status()
-    icon = "🟢" if side == "BUY" else "🔴"
-    print(f"{icon} [KR] {side} {stock_code} {qty}주 @ {price:,}원")
-    return res.json()
+
+    # raise_for_status 제거 — RAW 응답 그대로 출력
+    print(f"[DEBUG] HTTP Status: {res.status_code}")
+    print(f"[DEBUG] RAW Response: {res.text}")
+
+    try:
+        result = res.json()
+    except:
+        result = {"rt_cd": "9", "msg1": "JSON 파싱 실패"}
+
+    if result.get("rt_cd") == "0":
+        icon = "🟢" if side == "BUY" else "🔴"
+        print(f"{icon} [KR {side}] {stock_code} {qty}주 @ {price:,}원 ✅")
+    else:
+        print(f"⚠ [KR {side}] 주문 실패: {result.get('msg1','')}")
+
+    return result
 
 # ══════════════════════════════════════════════
 # 미국 주식
 # ══════════════════════════════════════════════
-
-# 거래소 코드 매핑
 US_EXCHANGE_MAP = {
-    # NASDAQ
     "NVDA":"NAS","AMD":"NAS","AAPL":"NAS","MSFT":"NAS","GOOGL":"NAS",
     "META":"NAS","TSLA":"NAS","AMZN":"NAS","TQQQ":"NAS","SOXL":"NAS",
-    "INTC":"NAS","QCOM":"NAS","AVGO":"NAS",
-    # NYSE
-    "TSM":"NYS","JPM":"NYS","BAC":"NYS","XOM":"NYS","GS":"NYS",
+    "PLTR":"NAS","CRWD":"NAS","NET":"NAS","DDOG":"NAS","SNOW":"NAS",
+    "COIN":"NAS","MRVL":"NAS","AVGO":"NAS","UBER":"NAS","MRNA":"NAS",
+    "BNTX":"NAS","INTC":"NAS","QCOM":"NAS",
+    "TSM":"NYS","JPM":"NYS","BAC":"NYS","XOM":"NYS","CVX":"NYS","GS":"NYS",
+    "FNGU":"NYS","LABU":"NYS",
 }
 
 def get_exchange(ticker: str) -> str:
     return US_EXCHANGE_MAP.get(ticker.upper(), "NAS")
 
 def get_price_us(ticker: str) -> dict:
-    """미국 주식 현재가 조회"""
-    excd = get_exchange(ticker)
-    tr_id = "HHDFS76200200"  # 해외주식 현재가 (모의/실전 동일)
+    excd  = get_exchange(ticker)
     res = requests.get(
         f"{US_BASE}/uapi/overseas-price/v1/quotations/price",
-        headers=get_headers(tr_id),
-        params={
-            "AUTH":  "",
-            "EXCD":  excd,
-            "SYMB":  ticker.upper()
-        }
+        headers=get_headers("HHDFS76200200"),
+        params={"AUTH": "", "EXCD": excd, "SYMB": ticker.upper()}
     )
     res.raise_for_status()
-    d = res.json()["output"]
+    d     = res.json()["output"]
     price = float(d.get("last", 0) or 0)
-    open_ = float(d.get("open", 0) or 0)
-    high  = float(d.get("high", 0) or 0)
-    low   = float(d.get("low",  0) or 0)
     prev  = float(d.get("base", price) or price)
-    vol   = int(d.get("tvol", 0) or 0)
     chg   = ((price - prev) / prev * 100) if prev else 0
     return {
         "code":        ticker.upper(),
         "market":      "US",
         "price":       price,
-        "open":        open_,
-        "high":        high,
-        "low":         low,
-        "volume":      vol,
+        "open":        float(d.get("open", 0) or 0),
+        "high":        float(d.get("high", 0) or 0),
+        "low":         float(d.get("low",  0) or 0),
+        "volume":      int(d.get("tvol", 0) or 0),
         "change_rate": round(chg, 2),
         "currency":    "USD",
         "exchange":    excd
     }
 
 def get_balance_us() -> dict:
-    """미국 주식 잔고/예수금 조회"""
     tr_id = "VTTS3012R" if IS_MOCK else "TTTS3012R"
     res = requests.get(
         f"{US_BASE}/uapi/overseas-stock/v1/trading/inquire-balance",
         headers=get_headers(tr_id),
         params={
-            "CANO":           ACCOUNT_NO,
-            "ACNT_PRDT_CD":   PROD_CD,
-            "OVRS_EXCG_CD":   "NASD",
-            "TR_CRCY_CD":     "USD",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": ""
+            "CANO": ACCOUNT_NO, "ACNT_PRDT_CD": PROD_CD,
+            "OVRS_EXCG_CD": "NASD", "TR_CRCY_CD": "USD",
+            "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
         }
     )
     res.raise_for_status()
-    data = res.json()
-    output2 = data.get("output2", {})
-    available_usd = float(output2.get("ovrs_ord_psbl_amt", 0) or 0)
-    return {"available_cash_usd": available_usd}
+    output2 = res.json().get("output2", {})
+    return {"available_cash_usd": float(output2.get("ovrs_ord_psbl_amt", 0) or 0)}
 
 def place_order_us(ticker: str, qty: int, price: float, side: str) -> dict:
-    """미국 주식 주문"""
-    excd = get_exchange(ticker)
-    if side == "BUY":
-        tr_id = "VTTT1002U" if IS_MOCK else "TTTT1002U"
-    else:
-        tr_id = "VTTT1001U" if IS_MOCK else "TTTT1001U"
+    excd  = get_exchange(ticker)
+    tr_id = ("VTTT1002U" if IS_MOCK else "TTTT1002U") if side == "BUY" \
+            else ("VTTT1001U" if IS_MOCK else "TTTT1001U")
+
+    body = {
+        "CANO":            ACCOUNT_NO,
+        "ACNT_PRDT_CD":    PROD_CD,
+        "OVRS_EXCG_CD":    excd,
+        "PDNO":            ticker.upper(),
+        "ORD_QTY":         str(qty),
+        "OVRS_ORD_UNPR":   f"{price:.2f}",
+        "ORD_SVR_DVSN_CD": "0",
+        "ORD_DVSN":        "00"
+    }
 
     res = requests.post(
         f"{US_BASE}/uapi/overseas-stock/v1/trading/order",
-        headers=get_headers(tr_id),
-        json={
-            "CANO":         ACCOUNT_NO,
-            "ACNT_PRDT_CD": PROD_CD,
-            "OVRS_EXCG_CD": excd,
-            "PDNO":         ticker.upper(),
-            "ORD_QTY":      str(qty),
-            "OVRS_ORD_UNPR": f"{price:.2f}",
-            "ORD_SVR_DVSN_CD": "0",
-            "ORD_DVSN":     "00"  # 지정가
-        }
+        headers=get_order_headers(tr_id, body),
+        json=body
     )
-    res.raise_for_status()
-    icon = "🟢" if side == "BUY" else "🔴"
-    print(f"{icon} [US] {side} {ticker} {qty}주 @ ${price:.2f}")
-    return res.json()
 
-# ══════════════════════════════════════════════
-# 통합 인터페이스
-# ══════════════════════════════════════════════
-def get_price_any(code: str) -> dict:
-    """종목코드가 숫자면 KR, 영문이면 US"""
-    if code.isdigit():
-        return get_price_kr(code)
+    print(f"[DEBUG US] HTTP: {res.status_code} | {res.text[:200]}")
+
+    try:
+        result = res.json()
+    except:
+        result = {"rt_cd": "9", "msg1": "JSON 파싱 실패"}
+
+    if result.get("rt_cd") == "0":
+        icon = "🟢" if side == "BUY" else "🔴"
+        print(f"{icon} [US {side}] {ticker} {qty}주 @ ${price:.2f} ✅")
     else:
-        return get_price_us(code)
+        print(f"⚠ [US {side}] 주문 실패: {result.get('msg1','')}")
+
+    return result
+
+# ── 통합 인터페이스 ────────────────────────────
+def get_price_any(code: str) -> dict:
+    return get_price_kr(code) if code.isdigit() else get_price_us(code)
 
 def place_order_any(code: str, qty: int, price: float, side: str) -> dict:
     if code.isdigit():
         return place_order_kr(code, qty, int(price), side)
-    else:
-        return place_order_us(code, qty, price, side)
+    return place_order_us(code, qty, price, side)
 
 # ── 테스트 ────────────────────────────────────
 if __name__ == "__main__":
-    print("=== KIS API 통합 테스트 ===")
-    print(f"환경: {'모의투자' if IS_MOCK else '실전투자'}\n")
+    print(f"=== KIS API 테스트 ({'모의투자' if IS_MOCK else '실전'}) ===\n")
 
-    print("[ 한국 주식 ]")
+    print("[한국 주식]")
     kr = get_price_kr("005930")
     print(f"삼성전자: {kr['price']:,}원 ({kr['change_rate']:+.2f}%)")
 
-    bal_kr = get_balance_kr()
-    print(f"KRW 예수금: {bal_kr['available_cash_krw']:,}원\n")
+    bal = get_balance_kr()
+    print(f"KRW 잔고: {bal['available_cash_krw']:,}원\n")
 
-    print("[ 미국 주식 ]")
-    try:
-        us = get_price_us("NVDA")
-        print(f"NVIDIA: ${us['price']:.2f} ({us['change_rate']:+.2f}%)")
-        bal_us = get_balance_us()
-        print(f"USD 예수금: ${bal_us['available_cash_usd']:.2f}")
-    except Exception as e:
-        print(f"미국 주식 조회 오류: {e}")
-        print("→ KIS Developers에서 해외주식 모의투자 신청 확인 필요")
+    print("[주문 테스트 — 삼성전자 1주 시장가]")
+    result = place_order_kr("005930", 1, 0, "BUY")
+    print(f"\n최종결과: rt_cd={result.get('rt_cd')} | {result.get('msg1','')}")
