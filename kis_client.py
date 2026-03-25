@@ -125,13 +125,17 @@ def place_order_kr(stock_code: str, qty: int, price: int, side: str) -> dict:
     tr_id = ("VTTC0802U" if IS_MOCK else "TTTC0802U") if side == "BUY" \
             else ("VTTC0801U" if IS_MOCK else "TTTC0801U")
 
+    # [수정됨] 가격이 0원이면 시장가("01"), 아니면 지정가("00")
+    ord_dvsn = "01" if price == 0 else "00"
+    ord_unpr = "0" if price == 0 else str(price)
+
     body = {
         "CANO":         ACCOUNT_NO,
         "ACNT_PRDT_CD": PROD_CD,
         "PDNO":         stock_code,
-        "ORD_DVSN":     "00",
+        "ORD_DVSN":     ord_dvsn,
         "ORD_QTY":      str(qty),
-        "ORD_UNPR":     str(price),
+        "ORD_UNPR":     ord_unpr,
     }
 
     headers = get_order_headers(tr_id, body)
@@ -148,7 +152,6 @@ def place_order_kr(stock_code: str, qty: int, price: int, side: str) -> dict:
         json=body
     )
 
-    # raise_for_status 제거 — RAW 응답 그대로 출력
     print(f"[DEBUG] HTTP Status: {res.status_code}")
     print(f"[DEBUG] RAW Response: {res.text}")
 
@@ -279,5 +282,6 @@ if __name__ == "__main__":
     print(f"KRW 잔고: {bal['available_cash_krw']:,}원\n")
 
     print("[주문 테스트 — 삼성전자 1주 시장가]")
+    # [수정됨] 이제 시장가(0원) 입력 시 자동으로 ORD_DVSN을 01로 전송합니다.
     result = place_order_kr("005930", 1, 0, "BUY")
     print(f"\n최종결과: rt_cd={result.get('rt_cd')} | {result.get('msg1','')}")

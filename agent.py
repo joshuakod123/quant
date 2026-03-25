@@ -1,5 +1,4 @@
-# agent.py — QUANT STATION PRO v2.2
-# FinanceDataReader로 전체 시장 스캔 + 소형주 발굴
+# agent.py — QUANT STATION PRO v3.0 (Smart Money Squeeze Model)
 import time
 import json
 import os
@@ -18,7 +17,10 @@ from strategy import (
     calc_atr, calc_kelly, calc_correlation,
     check_r_multiple, check_news_sentiment,
     check_time_filter, calc_rsi, calc_bollinger,
-    calc_momentum_score
+    calc_momentum_score,
+    # ─── 최강 퀀트 알고리즘 함수들 (strategy.py에 있어야 함) ───
+    calc_price_acceleration, calc_volatility_adjusted_momentum,
+    calc_obv_trend, check_volatility_squeeze 
 )
 
 # ══════════════════════════════════════════════
@@ -32,8 +34,8 @@ LOG_FILE         = "trades.json"
 HISTORY_DAYS     = 40
 
 SCAN_MIN_PRICE   = 1000
-SCAN_MAX_PRICE   = 150000
-SCAN_MIN_VOLUME  = 50000
+SCAN_MAX_PRICE   = 200000
+SCAN_MIN_VOLUME  = 30000 
 SCAN_MIN_CHANGE  = -3.0
 SCAN_MAX_CHANGE  = 12.0
 
@@ -91,7 +93,6 @@ class AgentState:
                 self.returns_history[code].pop(0)
 
     def preload(self, code, df):
-        """FDR DataFrame으로 히스토리 로드"""
         if df is None or len(df) < 5:
             return
         self.price_history[code]  = df["Close"].tolist()
@@ -143,9 +144,6 @@ class AgentState:
 
 state = AgentState()
 
-# ══════════════════════════════════════════════
-# FDR: 과거 데이터 로드
-# ══════════════════════════════════════════════
 def load_history(code: str) -> bool:
     try:
         end   = datetime.now()
@@ -159,163 +157,101 @@ def load_history(code: str) -> bool:
     except:
         return False
 
-# ══════════════════════════════════════════════
-# 사전 히스토리 로드
-# ══════════════════════════════════════════════
 def preload_all():
-    print("\n  📚 시장 데이터 사전 로드 중 (FDR)...")
+    print("\n  📚 퀀트 엔진: 전 종목(KOSPI/KOSDAQ/ETF) 데이터 스캔 준비 중...")
     end   = datetime.now()
     start = end - timedelta(days=5)
 
-    # FDR로 코스피/코스닥 전체 종목 리스트 + 오늘 시세
     all_codes = {}
-    for market_code, market_name in [("KRX/INDEX/STOCK/1001", "KOSPI"),
-                                      ("KRX/INDEX/STOCK/2001", "KOSDAQ")]:
-        try:
-            listing = fdr.StockListing(market_name)
-            if listing is None or listing.empty:
-                continue
-            # 컬럼명 정규화
-            listing.columns = [c.strip() for c in listing.columns]
-            code_col = next((c for c in listing.columns if "Code" in c or "종목코드" in c), None)
-            name_col = next((c for c in listing.columns if "Name" in c or "종목명" in c), None)
-            if not code_col or not name_col:
-                continue
-            for _, row in listing.iterrows():
-                code = str(row[code_col]).zfill(6)
-                name = str(row[name_col])
-                all_codes[code] = name
-        except Exception as e:
-            print(f"  ⚠ {market_name} 리스트 오류: {e}")
+    try:
+        # KRX 전체 포섭 (코스피, 코스닥, ETF)
+        listing = fdr.StockListing('KRX')
+        listing.columns = [c.strip() for c in listing.columns]
+        code_col = next((c for c in listing.columns if "Code" in c or "종목코드" in c), None)
+        name_col = next((c for c in listing.columns if "Name" in c or "종목명" in c), None)
+        
+        for _, row in listing.iterrows():
+            code = str(row[code_col]).zfill(6)
+            name = str(row[name_col])
+            all_codes[code] = name
+            
+        print(f"  ✅ 전체 시장 {len(all_codes)}개 종목 타겟팅 완료.")
+    except Exception as e:
+        print(f"  ⚠ 종목 리스트 로드 실패: {e}")
 
-    if not all_codes:
-        print("  ⚠ 종목 리스트 로드 실패 — 기본 종목으로 진행")
-        all_codes = {
-            "005930":"삼성전자","000660":"SK하이닉스","035420":"NAVER",
-            "005380":"현대차","035720":"카카오","000270":"기아",
-            "051910":"LG화학","068270":"셀트리온","003490":"대한항공",
-            "028260":"삼성물산","009540":"HD한국조선해양","047810":"한국항공우주",
-            "000100":"유한양행","145020":"휴젤","086820":"바이넥스",
-        }
-
-    # 거래량 기준 상위 종목만 히스토리 로드 (속도 최적화)
-    loaded = 0
-    sample = list(all_codes.items())[:60]  # 상위 60개
-    for code, name in sample:
-        if load_history(code):
-            loaded += 1
-        if loaded % 15 == 0 and loaded > 0:
-            print(f"     {loaded}개 로드 완료...")
-        time.sleep(0.1)
-
-    print(f"  ✅ {loaded}개 종목 히스토리 로드 완료\n")
     return all_codes
 
-# ══════════════════════════════════════════════
-# ★ 핵심: FDR 전체 시장 스캔
-# ══════════════════════════════════════════════
 def scan_kr_market(all_codes: dict) -> list:
-    """
-    전체 종목 중 조건 충족 종목 발굴
-    - 거래량 급등
-    - 적정 등락률
-    - 기술 지표 점수
-    """
-    print("  🔭 전체 시장 스캔 중...")
+    from strategy import (
+        calc_obv_trend, 
+        check_volatility_squeeze,
+        calc_kalman_kinematics # 방금 만든 통합 엔진
+    )
+    
+    print("  🔭 [Apex Model 가동] 칼만 필터 노이즈 제거 및 미적분 타점 포착 중...")
     candidates = []
     today = datetime.now()
-    start = today - timedelta(days=30)
+    start = today - timedelta(days=60)
 
     scanned = 0
-    for code, name in all_codes.items():
+    for code, name in list(all_codes.items())[:1000]: 
         try:
-            df = fdr.DataReader(
-                code,
-                start.strftime("%Y-%m-%d"),
-                today.strftime("%Y-%m-%d")
-            )
-            if df is None or len(df) < 10:
+            df = fdr.DataReader(code, start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
+            if df is None or len(df) < 30:
                 continue
 
             close  = float(df["Close"].iloc[-1])
             volume = int(df["Volume"].iloc[-1])
-            high   = float(df["High"].iloc[-1])
-            low    = float(df["Low"].iloc[-1])
-            open_  = float(df["Open"].iloc[-1])
-            prev_close = float(df["Close"].iloc[-2])
 
-            # 기본 필터
-            if not (SCAN_MIN_PRICE <= close <= SCAN_MAX_PRICE):
-                continue
-            if volume < SCAN_MIN_VOLUME:
-                continue
+            if not (1000 <= close <= 200000): continue
+            if volume < 30000: continue
 
-            # 등락률
-            chg_pct = (close - prev_close) / prev_close * 100
-            if not (SCAN_MIN_CHANGE <= chg_pct <= SCAN_MAX_CHANGE):
-                continue
-
-            # 히스토리 업데이트
             state.preload(code, df.tail(HISTORY_DAYS))
-
-            # 거래량 급등 비율
-            avg_vol = df["Volume"].iloc[-20:-1].mean()
-            vol_ratio = volume / avg_vol if avg_vol > 0 else 1.0
-
-            # 기술 지표
             ph = state.price_history.get(code, [])
-            rsi = calc_rsi(ph) if len(ph) >= 15 else 50.0
-            bb  = calc_bollinger(ph) if len(ph) >= 20 else {"pct_b": 0.5}
+            vh = state.volume_history.get(code, [])
+            hh = state.high_history.get(code, [])
+            lh = state.low_history.get(code, [])
 
-            # 점수 계산
-            vol_score  = min(vol_ratio / 3.0, 1.0)
-            chg_score  = min(max(chg_pct / 10, 0), 1.0)
-            rsi_score  = (100 - rsi) / 100
-            bb_score   = max(1 - bb["pct_b"], 0)
-            gap_score  = 0.3 if open_ > prev_close * 1.01 else 0
+            if len(ph) < 20: continue
 
-            # 과매수 패널티
-            if rsi > 75:
-                rsi_score = 0.0
+            # ─── 통합 알고리즘 적용 ───
+            # 1. 횡보하며 에너지가 응축되었는가?
+            is_squeezed = check_volatility_squeeze(ph, hh, lh, period=20)
+            
+            # 2. 기관 매집이 있는가?
+            obv_trend = calc_obv_trend(ph, vh, period=14)
+            
+            # 3. 칼만 필터 기반의 진짜 속도와 가속도 추출
+            kinematics = calc_kalman_kinematics(ph)
+            vel = kinematics["velocity"]
+            acc = kinematics["acceleration"]
 
-            score = (vol_score  * 0.30 +
-                     chg_score  * 0.20 +
-                     rsi_score  * 0.25 +
-                     bb_score   * 0.20 +
-                     gap_score  * 0.05)
-
-            reasons = []
-            if vol_ratio >= 2.0:
-                reasons.append(f"거래량{vol_ratio:.1f}배")
-            if chg_pct >= 3.0:
-                reasons.append(f"상승{chg_pct:+.1f}%")
-            if rsi < 35:
-                reasons.append(f"RSI과매도{rsi:.0f}")
-            if bb["pct_b"] < 0.25:
-                reasons.append("BB하단")
-            if not reasons:
-                reasons.append(f"종합{score:.2f}")
-
-            candidates.append((code, name, score, " | ".join(reasons)))
+            # [최종 타점 조건]
+            # 노이즈를 걷어낸 상태에서 가속도(acc)가 위로 강하게 꺾이고(>0.1),
+            # 에너지가 응축(is_squeezed)되어 있거나 기관 매집(obv_trend > 0.02)이 확인된 경우
+            if acc > 0.1 and (is_squeezed or obv_trend > 0.02):
+                
+                # 속도(방향성)와 가속도(폭발력)에 비례하여 스코어링
+                score = (acc * 5.0) + (obv_trend * 10.0) + (vel * 2.0)
+                if is_squeezed: score += 2.0
+                
+                reason = f"Kalman Acc:{acc:.2f} | Vel:{vel:.2f} | OBV:{obv_trend:.3f} | SQZ:{'ON' if is_squeezed else 'OFF'}"
+                candidates.append((code, name, score, reason))
+                
             scanned += 1
 
         except Exception:
             continue
 
-        time.sleep(0.05)  # FDR 과부하 방지
-
     candidates.sort(key=lambda x: x[2], reverse=True)
-    top = candidates[:10]
+    top = candidates[:5]
 
-    print(f"  ✅ {scanned}개 스캔 → 상위 {len(top)}개 선정")
-    for code, name, score, reason in top[:5]:
-        print(f"     • {name}({code}) [{score:.3f}] {reason}")
+    print(f"  ✅ {scanned}개 스캔 완료 → [칼만-키네마틱 타점] {len(top)}개 락온")
+    for code, name, score, reason in top:
+        print(f"     🎯 {name}({code}) [SCORE: {score:.2f}] {reason}")
 
     return top
 
-# ══════════════════════════════════════════════
-# US 동적 선정
-# ══════════════════════════════════════════════
 def scan_us_market(regime_mult: float) -> list:
     candidates = []
     for ticker, name in US_UNIVERSE.items():
@@ -323,7 +259,6 @@ def scan_us_market(regime_mult: float) -> list:
             ph = state.price_history.get(ticker, [])
             vh = state.volume_history.get(ticker, [])
 
-            # US 히스토리 없으면 FDR로 로드
             if len(ph) < 10:
                 end   = datetime.now()
                 start = end - timedelta(days=HISTORY_DAYS+5)
@@ -353,9 +288,6 @@ def scan_us_market(regime_mult: float) -> list:
     candidates.sort(key=lambda x: x[2], reverse=True)
     return candidates[:5]
 
-# ══════════════════════════════════════════════
-# 장 시간
-# ══════════════════════════════════════════════
 def is_kr_open():
     now = datetime.now()
     if now.weekday() >= 5: return False
@@ -370,26 +302,24 @@ def is_us_open():
 def is_any_open():
     return is_kr_open() or is_us_open()
 
-# ══════════════════════════════════════════════
-# 포지션 사이징 & 손절
-# ══════════════════════════════════════════════
 def calc_size(cash, price, regime_mult):
     kelly = calc_kelly(state.win_rate, state.avg_win, state.avg_loss)
     ratio = max(min(kelly * regime_mult, 0.35), 0.05)
     return max(int(cash * ratio / price), 0)
 
 def calc_stops(code, entry):
-    closes = state.price_history.get(code, [])
-    highs  = state.high_history.get(code, [])
-    lows   = state.low_history.get(code, [])
-    pct = 0.02
-    if len(closes) >= 15:
-        atr = calc_atr(highs, lows, closes)
-        pct = max(min((atr * 1.5) / entry, 0.05), 0.01)
+    """
+    [목표 2~3% 스나이퍼 셋팅]
+    기존 ATR 변동성 기반을 버리고, 진입가 대비 정확히 +2.5%에서 익절, -1.5%에서 손절합니다.
+    ETF나 대형주 스윙에 매우 적합한 짧고 확실한 타겟팅입니다.
+    """
+    take_profit_pct = 0.025  # +2.5% 도달 시 기계적 매도 (익절)
+    stop_loss_pct   = 0.015  # -1.5% 도달 시 기계적 매도 (손절 - 뼈를 내주고 생존)
+    
     return {
-        "stop_loss":   round(entry * (1 - pct), 4),
-        "take_profit": round(entry * (1 + pct * TAKE_PROFIT_R), 4),
-        "pct":         round(pct * 100, 2),
+        "stop_loss":   round(entry * (1 - stop_loss_pct), 4),
+        "take_profit": round(entry * (1 + take_profit_pct), 4),
+        "pct":         round(take_profit_pct * 100, 2),
     }
 
 def is_correlated(code):
@@ -402,12 +332,8 @@ def is_correlated(code):
             return True
     return False
 
-# ══════════════════════════════════════════════
-# 매수 시도
-# ══════════════════════════════════════════════
 def try_buy_kr(code, name, scan_reason, cash, regime):
     try:
-        # 히스토리 부족하면 로드
         if len(state.price_history.get(code, [])) < 20:
             load_history(code)
 
@@ -439,7 +365,11 @@ def try_buy_kr(code, name, scan_reason, cash, regime):
         qty = calc_size(cash, cur["price"], regime["position_mult"])
         if qty <= 0: return
 
-        place_order_kr(code, qty, cur["price"], "BUY")
+        order_res = place_order_kr(code, qty, cur["price"], "BUY")
+        if order_res.get("rt_cd") != "0":
+            print(f"  ❌ KIS 매수 실패: {order_res.get('msg1')}")
+            return
+
         state.positions_kr[code] = {
             "name": name, "qty": qty,
             "buy_price": cur["price"],
@@ -481,7 +411,12 @@ def try_buy_us(ticker, name, scan_reason, cash, regime):
             print(f"  ❌ Rule12: {name} {r_check['reason']}"); return
 
         qty = max(calc_size(cash, cur["price"], regime["position_mult"]), 1)
-        place_order_us(ticker, qty, cur["price"], "BUY")
+        
+        order_res = place_order_us(ticker, qty, cur["price"], "BUY")
+        if order_res.get("rt_cd") != "0":
+            print(f"  ❌ KIS US 매수 실패: {order_res.get('msg1')}")
+            return
+
         state.positions_us[ticker] = {
             "name": name, "qty": qty,
             "buy_price": cur["price"],
@@ -494,9 +429,6 @@ def try_buy_us(ticker, name, scan_reason, cash, regime):
     except Exception as e:
         print(f"  ⚠ US {name}({ticker}): {e}")
 
-# ══════════════════════════════════════════════
-# 보유 포지션 손절/익절
-# ══════════════════════════════════════════════
 def check_positions_kr():
     for code in list(state.positions_kr):
         try:
@@ -508,17 +440,19 @@ def check_positions_kr():
             pct = (price - pos["buy_price"]) / pos["buy_price"] * 100
 
             if price <= pos["stop_loss"]:
-                place_order_kr(code, pos["qty"], price, "SELL")
-                state.daily_pnl += pnl
-                state.log_trade("SELL", code, pos["name"], pos["qty"], price,
-                                f"Rule6 ATR손절 ({pct:+.2f}%)", "KRW", pnl)
-                del state.positions_kr[code]
+                res = place_order_kr(code, pos["qty"], price, "SELL")
+                if res.get("rt_cd") == "0":
+                    state.daily_pnl += pnl
+                    state.log_trade("SELL", code, pos["name"], pos["qty"], price,
+                                    f"Rule6 ATR손절 ({pct:+.2f}%)", "KRW", pnl)
+                    del state.positions_kr[code]
             elif price >= pos["take_profit"]:
-                place_order_kr(code, pos["qty"], price, "SELL")
-                state.daily_pnl += pnl
-                state.log_trade("SELL", code, pos["name"], pos["qty"], price,
-                                f"Rule12 {TAKE_PROFIT_R}R익절 ({pct:+.2f}%)", "KRW", pnl)
-                del state.positions_kr[code]
+                res = place_order_kr(code, pos["qty"], price, "SELL")
+                if res.get("rt_cd") == "0":
+                    state.daily_pnl += pnl
+                    state.log_trade("SELL", code, pos["name"], pos["qty"], price,
+                                    f"Rule12 {TAKE_PROFIT_R}R익절 ({pct:+.2f}%)", "KRW", pnl)
+                    del state.positions_kr[code]
             else:
                 print(f"  📌 KR {pos['name']}: {pct:+.2f}% | 손절:{pos['stop_loss']:,.0f} 목표:{pos['take_profit']:,.0f}")
             time.sleep(0.8)
@@ -536,31 +470,30 @@ def check_positions_us():
             pct = (price - pos["buy_price"]) / pos["buy_price"] * 100
 
             if price <= pos["stop_loss"]:
-                place_order_us(ticker, pos["qty"], price, "SELL")
-                state.daily_pnl += pnl * 1400
-                state.log_trade("SELL", ticker, pos["name"], pos["qty"], price,
-                                f"Rule6 ATR손절 ({pct:+.2f}%)", "USD", pnl)
-                del state.positions_us[ticker]
+                res = place_order_us(ticker, pos["qty"], price, "SELL")
+                if res.get("rt_cd") == "0":
+                    state.daily_pnl += pnl * 1400
+                    state.log_trade("SELL", ticker, pos["name"], pos["qty"], price,
+                                    f"Rule6 ATR손절 ({pct:+.2f}%)", "USD", pnl)
+                    del state.positions_us[ticker]
             elif price >= pos["take_profit"]:
-                place_order_us(ticker, pos["qty"], price, "SELL")
-                state.daily_pnl += pnl * 1400
-                state.log_trade("SELL", ticker, pos["name"], pos["qty"], price,
-                                f"Rule12 {TAKE_PROFIT_R}R익절 ({pct:+.2f}%)", "USD", pnl)
-                del state.positions_us[ticker]
+                res = place_order_us(ticker, pos["qty"], price, "SELL")
+                if res.get("rt_cd") == "0":
+                    state.daily_pnl += pnl * 1400
+                    state.log_trade("SELL", ticker, pos["name"], pos["qty"], price,
+                                    f"Rule12 {TAKE_PROFIT_R}R익절 ({pct:+.2f}%)", "USD", pnl)
+                    del state.positions_us[ticker]
             else:
                 print(f"  📌 US {pos['name']}: {pct:+.2f}% | 손절:${pos['stop_loss']:.2f} 목표:${pos['take_profit']:.2f}")
             time.sleep(0.8)
         except Exception as e:
             print(f"  ⚠ US포지션 오류 {ticker}: {e}")
 
-# ══════════════════════════════════════════════
-# 메인 루프
-# ══════════════════════════════════════════════
 def run_agent():
     print("=" * 62)
-    print("  ⚡ QUANT STATION PRO v2.2")
+    print("  ⚡ QUANT STATION PRO v3.0 [스마트머니 락온 모드]")
     print(f"  모드: {'모의투자' if IS_MOCK else '🔴 실전투자'}")
-    print("  엔진: FinanceDataReader | 전체시장 스캔 | 소형주 발굴")
+    print("  엔진: 변동성 스퀴즈 + OBV 기관 매집 + 가격 가속도")
     print("  R1~R12 전략 활성 | KR+US 동시 운용")
     print("=" * 62)
 
@@ -577,7 +510,6 @@ def run_agent():
     except:
         print("💵 USD: 장외시간 (정상)")
 
-    # 종목 리스트 + 사전 히스토리 로드
     all_codes = preload_all()
 
     cycle = 0
@@ -622,19 +554,16 @@ def run_agent():
                   f"승률:{state.win_rate*100:.1f}% | "
                   f"켈리R:{state.avg_win/max(state.avg_loss,0.1):.2f}")
 
-            # Rule 8
             if state.start_cash_krw > 0:
                 if state.daily_pnl / state.start_cash_krw <= DAILY_LOSS_LIMIT:
                     print("  🚨 Rule8: 일손실 한도 도달")
                     state.day_blocked = True; continue
 
-            # ── 한국 장 ──
             if is_kr_open() and not check_time_filter("KR")["blocked"]:
                 print(f"\n  ━━ 한국 장 ━━")
                 check_positions_kr()
 
                 if len(state.positions_kr) < MAX_POSITIONS_KR and regime["allow_buy"]:
-                    # 10분마다 스캔 (FDR은 KIS보다 느림)
                     if time.time() - state.last_scan_time > 600:
                         state.scan_candidates = scan_kr_market(all_codes)
                         state.last_scan_time  = time.time()
@@ -647,7 +576,6 @@ def run_agent():
                             try_buy_kr(code, name, reason, cash_krw, regime)
                             time.sleep(1.2)
 
-            # ── 미국 장 ──
             if is_us_open() and not check_time_filter("US")["blocked"]:
                 print(f"\n  ━━ 미국 장 ━━")
                 check_positions_us()

@@ -305,3 +305,147 @@ def get_final_signal(price_history: list, volume_history: list,
         "strategies":   strategies,
         "block_reason": ""
     }
+
+# strategy.py 기존 코드 아래에 추가하세요
+
+def calc_price_acceleration(prices: list, period: int = 5) -> float:
+    """
+    [수학적 우위 1] 가격의 2차 도함수(가속도) 계산
+    단순히 오르는 종목이 아니라, '오르는 속도가 빨라지는' 종목을 찾습니다.
+    """
+    if len(prices) < period * 2:
+        return 0.0
+    
+    # 최근 period 일의 속도 (Velocity)
+    v1 = (prices[-1] - prices[-period]) / prices[-period]
+    # 과거 period 일의 속도
+    v2 = (prices[-period] - prices[-period*2]) / prices[-period*2]
+    
+    # 가속도 (Acceleration) = 속도의 변화량
+    acceleration = v1 - v2
+    return round(acceleration * 100, 3)
+
+def calc_volatility_adjusted_momentum(prices: list, period: int = 20) -> float:
+    """
+    [수학적 우위 2] 변동성 조정 모멘텀 (Sharpe Ratio Proxy)
+    수익률을 변동성(표준편차)으로 나누어, 작전주처럼 위아래로 흔들리는 가짜 상승이 아닌
+    기관/외인이 밀어올리는 '안정적이고 강력한' 상승을 찾습니다.
+    """
+    if len(prices) < period + 1:
+        return 0.0
+    
+    returns = np.diff(prices[-period-1:]) / prices[-period-1:-1]
+    expected_return = np.mean(returns)
+    volatility = np.std(returns)
+    
+    if volatility == 0:
+        return 0.0
+    
+    # 연율화된 변동성 조정 모멘텀 (대략 252 거래일 기준)
+    vam = (expected_return / volatility) * np.sqrt(252)
+    return round(float(vam), 3)
+
+def calc_obv_trend(prices: list, volumes: list, period: int = 20) -> float:
+    """
+    [수학적 우위 3] 스마트머니 매집 지표 (OBV Trend)
+    가격은 제자리걸음이어도, 누적 거래량이 상승 중이라면 누군가 매집 중이라는 뜻입니다.
+    """
+    if len(prices) < period + 1 or len(volumes) < period + 1:
+        return 0.0
+        
+    obv = [0]
+    for i in range(1, len(prices)):
+        if prices[i] > prices[i-1]:
+            obv.append(obv[-1] + volumes[i])
+        elif prices[i] < prices[i-1]:
+            obv.append(obv[-1] - volumes[i])
+        else:
+            obv.append(obv[-1])
+
+    # 최근 period 동안의 OBV 기울기 (상승 중이면 +)
+    recent_obv = obv[-period:]
+    if recent_obv[0] == 0: return 0.0
+    
+    # OBV 변화율 반환
+    return round((recent_obv[-1] - recent_obv[0]) / (abs(recent_obv[0]) + 1), 3)
+
+def check_volatility_squeeze(prices: list, highs: list, lows: list, period: int = 20) -> bool:
+    """
+    [수학적 우위 4] 변동성 스퀴즈 (Volatility Compression)
+    볼린저 밴드가 켈트너 채널 안쪽으로 파고드는 현상. 에너지가 극도로 응축되었음을 의미.
+    """
+    if len(prices) < period + 1: return False
+    
+    sma = np.mean(prices[-period:])
+    std = np.std(prices[-period:])
+    
+    # 볼린저 밴드 상/하단
+    bb_upper = sma + (2 * std)
+    bb_lower = sma - (2 * std)
+
+    # 켈트너 채널 상/하단 계산을 위한 ATR 대용치
+    trs = []
+    for i in range(len(prices)-period, len(prices)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - prices[i-1]), abs(lows[i] - prices[i-1]))
+        trs.append(tr)
+    atr = np.mean(trs)
+    
+    kc_upper = sma + (1.5 * atr)
+    kc_lower = sma - (1.5 * atr)
+
+    # 스퀴즈 발생 조건: 볼린저 밴드가 켈트너 채널 안으로 완전히 들어옴
+    return (bb_upper < kc_upper) and (bb_lower > kc_lower)
+
+def apply_kalman_filter(prices: list) -> np.ndarray:
+    """
+    [수학적 우위 5] 1D 칼만 필터 (Kalman Filter)
+    단기적인 가격 노이즈(휩소)를 제거하고 주가의 '숨겨진 진짜 상태(True State)'를 추정합니다.
+    """
+    n_iter = len(prices)
+    sz = (n_iter,)
+    
+    Q = 1e-5 # 프로세스 분산 (추세가 얼마나 빨리 변하는가)
+    R = 0.01 # 측정 분산 (시장에 노이즈가 얼마나 많은가)
+    
+    xhat = np.zeros(sz)      # 사후 상태 추정치
+    P = np.zeros(sz)         # 사후 오차 공분산
+    xhatminus = np.zeros(sz) # 사전 상태 추정치
+    Pminus = np.zeros(sz)    # 사전 오차 공분산
+    K = np.zeros(sz)         # 칼만 이득 (Kalman Gain)
+
+    xhat[0] = prices[0]
+    P[0] = 1.0
+
+    for k in range(1, n_iter):
+        # 시간 업데이트 (예측)
+        xhatminus[k] = xhat[k-1]
+        Pminus[k] = P[k-1] + Q
+
+        # 측정 업데이트 (보정)
+        K[k] = Pminus[k] / (Pminus[k] + R)
+        xhat[k] = xhatminus[k] + K[k] * (prices[k] - xhatminus[k])
+        P[k] = (1 - K[k]) * Pminus[k]
+        
+    return xhat
+
+def calc_kalman_kinematics(prices: list) -> dict:
+    """
+    [수학적 우위 6] 칼만 필터 기반 미적분 동역학 (Velocity & Acceleration)
+    노이즈가 제거된 선을 바탕으로 1차 도함수(속도)와 2차 도함수(가속도)를 구합니다.
+    """
+    if len(prices) < 5:
+        return {"velocity": 0.0, "acceleration": 0.0}
+        
+    smoothed_prices = apply_kalman_filter(prices)
+    
+    # 1차 도함수 (Velocity - 속도)
+    v1 = (smoothed_prices[-1] - smoothed_prices[-2]) / smoothed_prices[-2]
+    v2 = (smoothed_prices[-2] - smoothed_prices[-3]) / smoothed_prices[-3]
+    
+    # 2차 도함수 (Acceleration - 가속도)
+    accel = v1 - v2
+    
+    return {
+        "velocity": round(v1 * 100, 3),
+        "acceleration": round(accel * 100, 3)
+    }
