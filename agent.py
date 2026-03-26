@@ -1,7 +1,8 @@
-# agent.py — QUANT STATION PRO v4.2 (Real-time HUD Dashboard)
+# agent.py — QUANT STATION PRO v4.4 (Server Auto-Sync HUD)
 import time
 import json
 import os
+import random
 import pandas as pd
 from datetime import datetime, timedelta
 import FinanceDataReader as fdr
@@ -131,18 +132,57 @@ def preload_all():
             "133690":"TIGER 미국나스닥100", "028260":"삼성물산", "105560":"KB금융"
         }
 
+# ─── 계좌 영혼 동기화 함수 ───
+def sync_account_holdings():
+    print("\n  🔄 [계좌 영혼 동기화] KIS 서버에서 실제 보유 종목을 불러옵니다...")
+    
+    try:
+        kr_bal = get_balance_kr()
+        state.start_cash_krw = kr_bal["available_cash_krw"]
+        for h in kr_bal.get("holdings", []):
+            code = h["code"]
+            if code not in state.positions_kr:
+                cur = get_price_kr(code)
+                state.positions_kr[code] = {
+                    "name": h["name"], "qty": h["qty"], "buy_price": h["buy_price"],
+                    "stop_loss": h["buy_price"] * 0.994,     
+                    "take_profit": h["buy_price"] * 1.010,   
+                    "highest_price": max(cur["price"], h["buy_price"])
+                }
+                print(f"     ✅ [KR 복구 완료] {h['name']}({code}) {h['qty']}주 감시망 재등록 완료")
+    except Exception as e: print(f"  ⚠ KR 동기화 실패: {e}")
+
+    try:
+        us_bal = get_balance_us()
+        state.start_cash_usd = us_bal["available_cash_usd"]
+        for h in us_bal.get("holdings", []):
+            ticker = h["ticker"]
+            if ticker not in state.positions_us:
+                cur = get_price_us(ticker)
+                state.positions_us[ticker] = {
+                    "name": h["name"], "qty": h["qty"], "buy_price": h["buy_price"],
+                    "stop_loss": h["buy_price"] * 0.994, 
+                    "take_profit": h["buy_price"] * 1.010,
+                    "highest_price": max(cur["price"], h["buy_price"])
+                }
+                print(f"     ✅ [US 복구 완료] {h['name']}({ticker}) {h['qty']}주 감시망 재등록 완료")
+    except Exception as e: print(f"  ⚠ US 동기화 실패: {e}")
+
 def scan_kr_market(all_codes: dict) -> list:
     global ml_config
-    print("  🔭 [Apex Model] ML 자가학습 컷오프 적용 스캔 중...")
+    print("  🔭 [Apex Radar] 무작위 400개 섹터 정밀 스캔 중 (고인물 방지)...")
     candidates = []
     start = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     today = datetime.now().strftime("%Y-%m-%d")
 
-    target_obv = ml_config.get("min_obv_trend", 0.02)
-    target_acc = ml_config.get("min_acceleration", 0.1)
+    target_obv = max(min(ml_config.get("min_obv_trend", 0.01), 0.05), 0.005)
+    target_acc = max(min(ml_config.get("min_acceleration", 0.02), 0.05), 0.005)
+
+    items = list(all_codes.items())
+    scan_pool = random.sample(items, min(400, len(items)))
 
     scanned = 0
-    for code, name in list(all_codes.items())[:1000]: 
+    for code, name in scan_pool:
         try:
             df = fdr.DataReader(code, start, today)
             if df is None or len(df) < 30: continue
@@ -163,15 +203,15 @@ def scan_kr_market(all_codes: dict) -> list:
             vel, acc = kinematics["velocity"], kinematics["acceleration"]
 
             if acc > target_acc and (is_squeezed or obv_trend > target_obv):
-                score = (acc * 5.0) + (obv_trend * 10.0) + (vel * 2.0) + (2.0 if is_squeezed else 0)
-                reason = f"OBV:{obv_trend:.3f} | Accel:{acc:.2f} | SQZ:{'ON' if is_squeezed else 'OFF'}"
+                score = (acc * 10.0) + (obv_trend * 10.0) + (vel * 2.0) + (2.0 if is_squeezed else 0)
+                reason = f"OBV:{obv_trend:.3f} | Accel:{acc:.3f} | SQZ:{'ON' if is_squeezed else 'OFF'}"
                 candidates.append((code, name, score, reason))
             scanned += 1
         except: continue
 
     candidates.sort(key=lambda x: x[2], reverse=True)
     top = candidates[:5]
-    print(f"  ✅ {scanned}개 스캔 완료 → 락온 타점 {len(top)}개 발견")
+    print(f"  ✅ {scanned}개 무작위 스캔 완료 → 락온 타점 {len(top)}개 발견")
     return top
 
 def scan_us_market(regime_mult: float) -> list:
@@ -225,7 +265,7 @@ def try_buy_kr(code, name, scan_reason, cash, regime):
         
         if is_correlated(code): return print(f"     👉 [패스] {name}: 상관성 초과")
         if check_news_sentiment(state.recent_news_tags)["blocked"]: return print(f"     👉 [패스] {name}: 뉴스 리스크")
-        if check_time_filter("KR")["blocked"]: return print(f"     👉 [패스] {name}: 장초/장막판")
+        if check_time_filter("KR")["blocked"]: return print(f"     👉 [패스] {name}: 장초/장막판 변동성")
         if check_gap_down(cur.get("open", cur["price"]), state.prev_close.get(code, 0))["blocked"]: return print(f"     👉 [패스] {name}: 갭다운")
         if cash < 50000: return print(f"     👉 [패스] {name}: 예수금 부족")
 
@@ -250,11 +290,15 @@ def try_buy_us(ticker, name, scan_reason, cash, regime):
         cur = get_price_us(ticker)
         state.update_history(ticker, cur["price"], cur["volume"], cur["high"], cur["low"])
         
-        if is_correlated(ticker) or check_news_sentiment(state.recent_news_tags)["blocked"] or check_time_filter("US")["blocked"] or cash < 10: return
+        if is_correlated(ticker): return print(f"     👉 [패스] {name}: 상관성 초과")
+        if check_news_sentiment(state.recent_news_tags)["blocked"]: return print(f"     👉 [패스] {name}: 뉴스 리스크")
+        if check_time_filter("US")["blocked"]: return print(f"     👉 [패스] {name}: 개장 직후 변동성 회피")
+        if cash < 10: return print(f"     👉 [패스] {name}: 미국 달러 예수금 부족 (현재 ${cash:.2f})")
+        
         qty = max(calc_size(cash, cur["price"], regime["position_mult"]), 1)
         
         order_res = place_order_us(ticker, qty, cur["price"], "BUY")
-        if order_res.get("rt_cd") != "0": return
+        if order_res.get("rt_cd") != "0": return print(f"     ❌ 매수 거절: {order_res.get('msg1')}")
 
         state.positions_us[ticker] = {
             "name": name, "qty": qty, "buy_price": cur["price"],
@@ -286,7 +330,6 @@ def check_positions_kr():
             kinematics = calc_kalman_kinematics(state.price_history.get(code, []))
             acc = kinematics["acceleration"]
 
-            # 매도 조건 체크
             sold = False
             if pct < -0.2 and acc < -0.2:
                 res = place_order_kr(code, pos["qty"], 0, "SELL") 
@@ -318,7 +361,7 @@ def check_positions_kr():
                         print(f"     🟢 [청산] {pos['name']} 기계적 익절 완료 ({pct:+.2f}%)")
             
             if not sold:
-                print(f"     📌 {pos['name']} | 수익: {pct:+.2f}% | 현재가: {price:,}원 (목표: {pos['take_profit']:,.0f} / 손절: {pos['stop_loss']:,.0f}) | Acc: {acc:.2f}")
+                print(f"     📌 {pos['name']} | 수익: {pct:+.2f}% | 현재가: {price:,}원 (목표: {pos['take_profit']:,.0f} / 손절: {pos['stop_loss']:,.0f}) | Acc: {acc:.3f}")
             time.sleep(0.5)
         except Exception as e: print(f"  ⚠ KR포지션 오류 {code}: {e}")
 
@@ -349,45 +392,51 @@ def check_positions_us():
                     state.daily_pnl += pnl * 1400
                     state.log_trade("SELL", ticker, pos["name"], pos["qty"], price, f"조기 손절", "USD", pnl)
                     del state.positions_us[ticker]; state.last_scan_time = 0; sold = True
+                    print(f"     🔴 [청산] {pos['name']} 가속도 붕괴 조기 손절 ({pct:+.2f}%)")
             elif price <= pos["stop_loss"] and not sold:
                 res = place_order_us(ticker, pos["qty"], price, "SELL")
                 if res.get("rt_cd") == "0":
                     state.daily_pnl += pnl * 1400
                     state.log_trade("SELL", ticker, pos["name"], pos["qty"], price, f"하드 손절 (-0.6%)", "USD", pnl)
                     del state.positions_us[ticker]; state.last_scan_time = 0; sold = True
+                    print(f"     🔴 [청산] {pos['name']} 하드 손절 도달 ({pct:+.2f}%)")
             elif price >= pos["take_profit"] and not sold:
                 if acc > 0.05:
                     pos["take_profit"] = price * 1.01
                     pos["stop_loss"] = price * 0.995 
+                    print(f"     🔥 [돌파] {pos['name']} 수익률 {pct:+.2f}% 돌파! 가속도 양호, 목표가 상향 (Trailing)")
                 else:
                     res = place_order_us(ticker, pos["qty"], price, "SELL")
                     if res.get("rt_cd") == "0":
                         state.daily_pnl += pnl * 1400
                         state.log_trade("SELL", ticker, pos["name"], pos["qty"], price, f"기계적 익절 (+1.0%)", "USD", pnl)
                         del state.positions_us[ticker]; state.last_scan_time = 0; sold = True
+                        print(f"     🟢 [청산] {pos['name']} 기계적 익절 완료 ({pct:+.2f}%)")
             
             if not sold:
-                print(f"     📌 {pos['name']} | 수익: {pct:+.2f}% | 현재가: ${price:.2f} (목표: ${pos['take_profit']:.2f} / 손절: ${pos['stop_loss']:.2f}) | Acc: {acc:.2f}")
+                print(f"     📌 {pos['name']} | 수익: {pct:+.2f}% | 현재가: ${price:.2f} (목표: ${pos['take_profit']:.2f} / 손절: ${pos['stop_loss']:.2f}) | Acc: {acc:.3f}")
             time.sleep(0.5)
         except Exception as e: print(f"  ⚠ US포지션 오류 {ticker}: {e}")
 
 def run_agent():
     global ml_config
     print("\n\n" + "=" * 65)
-    print("  ⚡ QUANT STATION PRO v4.2 [Real-time HUD Dashboard]")
+    print("  ⚡ QUANT STATION PRO v4.4 [계좌 완벽 동기화 모드]")
     print(f"  모드: {'모의투자' if IS_MOCK else '🔴 실전투자'}")
-    print(f"  엔진: 칼만 필터 + 1.0% 초단타 + 트레일링 스탑")
+    print(f"  엔진: 랜덤 400개 스캔 + 실시간 동기화(Sync) 방어")
     print("=" * 65)
 
     state.running = True
     all_codes = preload_all()
+    
+    # ── 봇 시작 시 무조건 실제 증권사 계좌와 보유 종목 동기화 ──
+    sync_account_holdings()
 
     cycle = 0
     while state.running:
         try:
             now = datetime.now()
             
-            # 자정 ML 엔진 구동
             if now.hour == 0 and now.minute < 1:
                 ml_config = ml_engine.optimize_model()
                 state.daily_pnl = 0; state.day_blocked = False
@@ -404,11 +453,10 @@ def run_agent():
             regime = check_market_regime(vix)
             
             try: cash_krw = get_balance_kr()["available_cash_krw"]
-            except: cash_krw = 0
+            except: cash_krw = state.start_cash_krw
             try: cash_usd = get_balance_us()["available_cash_usd"]
-            except: cash_usd = 0
+            except: cash_usd = state.start_cash_usd
 
-            # ─── 대시보드 헤더 출력 ───
             print(f"\n\n{'='*65}")
             print(f" 🕒 Cycle {cycle} | {now.strftime('%H:%M:%S')} | KR:{'🟢' if is_kr_open() else '⚫'} US:{'🟢' if is_us_open() else '⚫'}")
             print(f" 📊 {regime['regime']} | {regime['reason']}")
@@ -418,7 +466,6 @@ def run_agent():
             if state.day_blocked:
                 print("  🚨 Rule8: 일일 손실 한도로 거래 중단"); time.sleep(60); continue
 
-            # ─── 한국장 ───
             if is_kr_open():
                 print(f"  [🇰🇷 한국 장 실시간 모니터링]")
                 check_positions_kr()
@@ -442,7 +489,6 @@ def run_agent():
                         print(f"  ⏳ 다음 전체 스캔까지 {int(time_left)}초 남음...")
                 print(f"{'-'*65}")
 
-            # ─── 미국장 ───
             if is_us_open():
                 print(f"  [🇺🇸 미국 장 실시간 모니터링]")
                 check_positions_us()

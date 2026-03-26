@@ -1,4 +1,4 @@
-# kis_client.py — KR+US 통합 (디버그 모드)
+# kis_client.py — KR+US 통합 (보유종목 Sync 기능 추가)
 import os, requests, json
 import time as _time
 from dotenv import load_dotenv
@@ -17,7 +17,6 @@ US_BASE = KR_BASE
 
 TOKEN_FILE = ".token_cache.json"
 
-# ── 토큰 발급 ──────────────────────────────────
 def get_token() -> str:
     if os.path.exists(TOKEN_FILE):
         try:
@@ -40,10 +39,8 @@ def get_token() -> str:
     }
     with open(TOKEN_FILE, "w") as f:
         json.dump(cache, f)
-    print("✅ 토큰 발급 완료")
     return cache["token"]
 
-# ── Hashkey ────────────────────────────────────
 def get_hashkey(data: dict) -> str:
     try:
         res = requests.post(
@@ -57,10 +54,8 @@ def get_hashkey(data: dict) -> str:
         )
         return res.json().get("HASH", "")
     except Exception as e:
-        print(f"⚠ hashkey 발급 실패: {e}")
         return ""
 
-# ── 헤더 ───────────────────────────────────────
 def get_headers(tr_id: str) -> dict:
     return {
         "Content-Type":  "application/json",
@@ -99,9 +94,6 @@ def get_price_kr(stock_code: str) -> dict:
         "currency":    "KRW"
     }
 
-def get_price(stock_code: str) -> dict:
-    return get_price_kr(stock_code)
-
 def get_balance_kr() -> dict:
     res = requests.get(
         f"{KR_BASE}/uapi/domestic-stock/v1/trading/inquire-balance",
@@ -115,17 +107,25 @@ def get_balance_kr() -> dict:
         }
     )
     res.raise_for_status()
-    o = res.json()["output2"][0]
-    return {"available_cash_krw": int(o["dnca_tot_amt"])}
-
-def get_balance() -> dict:
-    return get_balance_kr()
+    data = res.json()
+    
+    cash = int(data["output2"][0]["dnca_tot_amt"]) if data.get("output2") else 0
+    holdings = []
+    
+    for item in data.get("output1", []):
+        if int(item.get("hldg_qty", 0)) > 0:
+            holdings.append({
+                "code": item["pdno"],
+                "name": item["prdt_name"],
+                "qty": int(item["hldg_qty"]),
+                "buy_price": float(item["pchs_avg_pric"])
+            })
+            
+    return {"available_cash_krw": cash, "holdings": holdings}
 
 def place_order_kr(stock_code: str, qty: int, price: int, side: str) -> dict:
     tr_id = ("VTTC0802U" if IS_MOCK else "TTTC0802U") if side == "BUY" \
             else ("VTTC0801U" if IS_MOCK else "TTTC0801U")
-
-    # [수정됨] 가격이 0원이면 시장가("01"), 아니면 지정가("00")
     ord_dvsn = "01" if price == 0 else "00"
     ord_unpr = "0" if price == 0 else str(price)
 
@@ -138,34 +138,13 @@ def place_order_kr(stock_code: str, qty: int, price: int, side: str) -> dict:
         "ORD_UNPR":     ord_unpr,
     }
 
-    headers = get_order_headers(tr_id, body)
-
-    # ── 디버그: 요청 내용 출력 ──
-    print(f"\n[DEBUG] URL: {KR_BASE}/uapi/domestic-stock/v1/trading/order-cash")
-    print(f"[DEBUG] tr_id: {tr_id}")
-    print(f"[DEBUG] CANO: {ACCOUNT_NO} / PROD_CD: {PROD_CD}")
-    print(f"[DEBUG] body: {json.dumps(body, ensure_ascii=False)}")
-
     res = requests.post(
         f"{KR_BASE}/uapi/domestic-stock/v1/trading/order-cash",
-        headers=headers,
+        headers=get_order_headers(tr_id, body),
         json=body
     )
-
-    print(f"[DEBUG] HTTP Status: {res.status_code}")
-    print(f"[DEBUG] RAW Response: {res.text}")
-
-    try:
-        result = res.json()
-    except:
-        result = {"rt_cd": "9", "msg1": "JSON 파싱 실패"}
-
-    if result.get("rt_cd") == "0":
-        icon = "🟢" if side == "BUY" else "🔴"
-        print(f"{icon} [KR {side}] {stock_code} {qty}주 @ {price:,}원 ✅")
-    else:
-        print(f"⚠ [KR {side}] 주문 실패: {result.get('msg1','')}")
-
+    try: result = res.json()
+    except: result = {"rt_cd": "9", "msg1": "JSON 파싱 실패"}
     return result
 
 # ══════════════════════════════════════════════
@@ -221,8 +200,21 @@ def get_balance_us() -> dict:
         }
     )
     res.raise_for_status()
-    output2 = res.json().get("output2", {})
-    return {"available_cash_usd": float(output2.get("ovrs_ord_psbl_amt", 0) or 0)}
+    data = res.json()
+    
+    cash = float(data.get("output2", {}).get("ovrs_ord_psbl_amt", 0)) if data.get("output2") else 0
+    holdings = []
+    
+    for item in data.get("output1", []):
+        if int(item.get("ovrs_cblc_qty", 0)) > 0:
+            holdings.append({
+                "ticker": item["ovrs_pdno"],
+                "name": item["ovrs_item_name"],
+                "qty": int(item["ovrs_cblc_qty"]),
+                "buy_price": float(item["pchs_avg_pric"])
+            })
+            
+    return {"available_cash_usd": cash, "holdings": holdings}
 
 def place_order_us(ticker: str, qty: int, price: float, side: str) -> dict:
     excd  = get_exchange(ticker)
@@ -245,43 +237,6 @@ def place_order_us(ticker: str, qty: int, price: float, side: str) -> dict:
         headers=get_order_headers(tr_id, body),
         json=body
     )
-
-    print(f"[DEBUG US] HTTP: {res.status_code} | {res.text[:200]}")
-
-    try:
-        result = res.json()
-    except:
-        result = {"rt_cd": "9", "msg1": "JSON 파싱 실패"}
-
-    if result.get("rt_cd") == "0":
-        icon = "🟢" if side == "BUY" else "🔴"
-        print(f"{icon} [US {side}] {ticker} {qty}주 @ ${price:.2f} ✅")
-    else:
-        print(f"⚠ [US {side}] 주문 실패: {result.get('msg1','')}")
-
+    try: result = res.json()
+    except: result = {"rt_cd": "9", "msg1": "JSON 파싱 실패"}
     return result
-
-# ── 통합 인터페이스 ────────────────────────────
-def get_price_any(code: str) -> dict:
-    return get_price_kr(code) if code.isdigit() else get_price_us(code)
-
-def place_order_any(code: str, qty: int, price: float, side: str) -> dict:
-    if code.isdigit():
-        return place_order_kr(code, qty, int(price), side)
-    return place_order_us(code, qty, price, side)
-
-# ── 테스트 ────────────────────────────────────
-if __name__ == "__main__":
-    print(f"=== KIS API 테스트 ({'모의투자' if IS_MOCK else '실전'}) ===\n")
-
-    print("[한국 주식]")
-    kr = get_price_kr("005930")
-    print(f"삼성전자: {kr['price']:,}원 ({kr['change_rate']:+.2f}%)")
-
-    bal = get_balance_kr()
-    print(f"KRW 잔고: {bal['available_cash_krw']:,}원\n")
-
-    print("[주문 테스트 — 삼성전자 1주 시장가]")
-    # [수정됨] 이제 시장가(0원) 입력 시 자동으로 ORD_DVSN을 01로 전송합니다.
-    result = place_order_kr("005930", 1, 0, "BUY")
-    print(f"\n최종결과: rt_cd={result.get('rt_cd')} | {result.get('msg1','')}")
