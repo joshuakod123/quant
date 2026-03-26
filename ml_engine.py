@@ -8,27 +8,19 @@ TRADE_LOG_FILE = "trades.json"
 CONFIG_FILE = "ml_config.json"
 
 def load_trades():
-    if not os.path.exists(TRADE_LOG_FILE):
-        return []
+    if not os.path.exists(TRADE_LOG_FILE): return []
     try:
         with open(TRADE_LOG_FILE, "r") as f:
             return json.load(f)
-    except:
-        return []
+    except: return []
 
 def load_config():
-    default_config = {
-        "min_obv_trend": 0.02,
-        "min_acceleration": 0.1,
-        "learning_rate": 0.1,
-        "last_trained": ""
-    }
+    default_config = {"min_obv_trend": 0.02, "min_acceleration": 0.1, "learning_rate": 0.1, "last_trained": ""}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 return json.load(f)
-        except:
-            pass
+        except: pass
     return default_config
 
 def save_config(config):
@@ -36,36 +28,31 @@ def save_config(config):
         json.dump(config, f, indent=4)
 
 def optimize_model():
-    """
-    매일 장 마감 후 실행되는 머신러닝(Parameter Optimization) 로직.
-    승리한 거래(PnL > 0)의 특징(OBV, Accel)을 학습하여 내일의 매수 기준을 진화시킵니다.
-    """
     print("\n  🧠 [ML Engine] 자가학습 및 파라미터 최적화 시작...")
     trades = load_trades()
     config = load_config()
     
-    # 데이터가 부족하면 학습 보류
     if len(trades) < 5:
         print("  🧠 [ML Engine] 데이터 부족 (최소 5건 필요). 기존 설정 유지.")
         return config
 
-    win_obvs = []
-    win_accs = []
-    loss_obvs = []
-    loss_accs = []
+    win_obvs, win_accs = [], []
+    loss_obvs, loss_accs = [], []
 
-    # 거래 로그에서 텍스트로 저장된 사유(reason)를 파싱하여 데이터 추출
     for t in trades:
         if t.get("action") != "BUY": continue
         
         reason = t.get("reason", "")
-        # 예시: "OBV:0.045 | Accel:0.8 | SQZ:ON"
+        
+        # [안전장치] 미국 주식 로그(Mom:.. RSI:..)가 섞여 들어오면 학습 생략 
+        if "OBV" not in reason or "Accel" not in reason:
+            continue
+            
         try:
             parts = reason.split("|")
             obv_val = float(parts[0].split(":")[1].strip())
             acc_val = float(parts[1].split(":")[1].strip())
             
-            # 다음 짝이 되는 SELL 로그를 찾아 손익(PnL) 확인
             pnl = 0
             for sell_t in trades:
                 if sell_t.get("action") == "SELL" and sell_t.get("code") == t.get("code") and sell_t.get("time") > t.get("time"):
@@ -81,18 +68,15 @@ def optimize_model():
         except:
             continue
 
-    # ─── 경사상승법 (Gradient Update) 적용 ───
     lr = config["learning_rate"]
     
     if win_obvs and win_accs:
         avg_win_obv = np.mean(win_obvs)
         avg_win_acc = np.mean(win_accs)
         
-        # 승리한 패턴의 평균값 방향으로 현재 파라미터를 10%(lr) 이동시킴
         new_obv = config["min_obv_trend"] + lr * (avg_win_obv - config["min_obv_trend"])
         new_acc = config["min_acceleration"] + lr * (avg_win_acc - config["min_acceleration"])
         
-        # 극단적인 값 방지 (Clipping)
         config["min_obv_trend"] = round(max(min(new_obv, 0.1), 0.01), 4)
         config["min_acceleration"] = round(max(min(new_acc, 1.0), 0.05), 4)
         config["last_trained"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -103,10 +87,9 @@ def optimize_model():
         print(f"     - 필요 매집강도(OBV): {config['min_obv_trend']:.4f}")
         print(f"     - 필요 폭발력(Accel): {config['min_acceleration']:.4f}")
     else:
-        print("  🧠 [ML Engine] 의미 있는 승리/패배 데이터 편차 없음. 유지.")
+        print("  🧠 [ML Engine] 의미 있는 승리 패턴 추출 실패. 유지.")
 
     return config
 
 if __name__ == "__main__":
-    # 단독 실행 테스트용
     optimize_model()

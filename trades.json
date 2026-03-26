@@ -1,24 +1,13 @@
 [
   {
-    "time": "2026-03-25 14:19:25",
-    "action": "BUY",
-    "code": "055550",
-    "name": "신한지주",
-    "qty": 5,
-    "price": 92700,
-    "currency": "KRW",
-    "reason": "Apex 타점 포착",
-    "pnl": 0
-  },
-  {
-    "time": "2026-03-25 14:19:28",
+    "time": "2026-03-25 14:40:54",
     "action": "BUY",
     "code": "122630",
     "name": "KODEX 레버리지",
     "qty": 5,
-    "price": 84750,
+    "price": 84650,
     "currency": "KRW",
-    "reason": "Apex 타점 포착",
+    "reason": "OBV:0.264 | Accel:0.12 | SQZ:OFF",
     "pnl": 0
   }
 ]
