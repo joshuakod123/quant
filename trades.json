@@ -1,24 +1,68 @@
 [
   {
-    "time": "2026-03-26 09:39:29",
+    "time": "2026-04-02 10:17:41",
     "action": "SELL",
-    "code": "005930",
-    "name": "삼성전자",
-    "qty": 1,
-    "price": 184200,
+    "code": "105560",
+    "name": "KB금융",
+    "qty": 6,
+    "price": 150600,
     "currency": "KRW",
-    "reason": "하드 손절 (-0.6%)",
-    "pnl": -11600.0
+    "reason": "조기 손절(Early Cut)",
+    "pnl": -7800.0
   },
   {
-    "time": "2026-03-26 09:39:32",
+    "time": "2026-04-02 10:17:44",
     "action": "BUY",
     "code": "105560",
     "name": "KB금융",
     "qty": 3,
-    "price": 151700,
+    "price": 150600,
     "currency": "KRW",
-    "reason": "OBV:0.894 | Accel:0.064 | SQZ:ON",
+    "reason": "OBV:25.579 | Accel:0.083 | SQZ:ON",
     "pnl": 0
+  },
+  {
+    "time": "2026-04-02 10:17:45",
+    "action": "BUY",
+    "code": "133690",
+    "name": "TIGER 미국나스닥100",
+    "qty": 2,
+    "price": 160325,
+    "currency": "KRW",
+    "reason": "OBV:0.201 | Accel:0.026 | SQZ:OFF",
+    "pnl": 0
+  },
+  {
+    "time": "2026-04-02 10:22:59",
+    "action": "SELL",
+    "code": "105560",
+    "name": "KB금융",
+    "qty": 3,
+    "price": 149300,
+    "currency": "KRW",
+    "reason": "하드 손절 (-0.55%)",
+    "pnl": -3900
+  },
+  {
+    "time": "2026-04-02 10:23:02",
+    "action": "BUY",
+    "code": "105560",
+    "name": "KB금융",
+    "qty": 3,
+    "price": 149300,
+    "currency": "KRW",
+    "reason": "OBV:25.880 | Accel:0.041 | SQZ:ON",
+    "pnl": 0
+  },
+  {
+    "time": "2026-04-02 10:32:16",
+    "action": "SELL",
+    "code": "105560",
+    "name": "KB금융",
+    "qty": 3,
+    "price": 148000,
+    "currency": "KRW",
+    "reason": "하드 손절 (-0.55%)",
+    "pnl": -3900
   }
 ]
